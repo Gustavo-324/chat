@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="pt-BR"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Valtrix Chat V3</title><link rel="stylesheet" href="css/style.css"></head>
+<body>
+<div id="auth" class="auth"><div class="auth-card"><div class="brand">V</div><h1>Valtrix</h1><p id="auth-desc">Seu espaço para conversar.</p>
+<div id="login-form"><input id="login-user" placeholder="Usuário"><input id="login-pass" type="password" placeholder="Senha"><button id="login-btn">Entrar</button><button class="ghost" id="show-register">Criar conta</button></div>
+<div id="register-form" class="hidden"><input id="reg-name" placeholder="Nome de exibição"><input id="reg-user" placeholder="Usuário (3-32 caracteres)"><input id="reg-pass" type="password" placeholder="Senha (mín. 6 caracteres)"><button id="register-btn">Criar conta</button><button class="ghost" id="show-login">Já tenho conta</button></div>
+<div id="auth-error" class="error"></div></div></div>
+
+<div id="app" class="hidden app"><aside class="sidebar"><div class="side-top"><div class="profile"><div id="me-avatar" class="avatar">V</div><div><strong id="me-name"></strong><small><i></i> online</small></div></div><button id="logout" class="icon">↪</button></div>
+<div class="search">⌕ <input id="filter" placeholder="Pesquisar"></div><div class="label">GRUPOS <button id="create-group">＋</button></div><div id="groups"></div></aside>
+<section class="chat"><header class="chat-head"><div><h2 id="group-name">Selecione um grupo</h2><small id="group-meta">—</small></div><div class="actions"><button id="voice" title="Voz">☎</button><button id="video" title="Vídeo">▣</button><button id="screen" title="Tela">▤</button></div></header>
+<div id="messages" class="messages"></div>
+<div id="call" class="call hidden"><div class="call-title"><span>●</span><b id="call-text">Chamada</b><button id="call-min">—</button></div><div id="videos" class="videos"></div><div class="controls"><button id="mute">🎙️ Mutar</button><button id="deafen">🔊 Desligar áudio</button><button id="cam">📹 Câmera</button><button id="share">🖥️ Tela</button><button id="hang" class="danger">☎ Encerrar</button></div></div>
+<form id="composer"><button type="button">＋</button><input id="msg" placeholder="Selecione um grupo primeiro" disabled><button>➤</button></form></section></div>
+<div id="toast" class="toast"></div><script src="/socket.io/socket.io.js"></script><script src="js/app.js"></script>
+</body></html>
