@@ -4,109 +4,67 @@ const path = require("path");
 const fs = require("fs");
 const http = require("http");
 const express = require("express");
-const { Server } = require("socket.io");
-const Database = require("better-sqlite3");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
-
-// ======================================================
-// CONFIGURAÇÃO
-// ======================================================
+const Database = require("better-sqlite3");
+const { Server } = require("socket.io");
 
 const app = express();
 const server = http.createServer(app);
-
-const PORT = process.env.PORT || 3000;
-
-const JWT_SECRET =
-  process.env.JWT_SECRET ||
-  "valtrix-chave-temporaria-troque-em-producao";
-
-// ======================================================
-// SOCKET.IO
-// ======================================================
-
 const io = new Server(server, {
-  cors: {
-    origin: true,
-    credentials: true
-  }
+  cors: { origin: true, credentials: true }
 });
 
-// ======================================================
-// BANCO DE DADOS
-// ======================================================
+const PORT = Number(process.env.PORT || 3000);
+const JWT_SECRET = process.env.JWT_SECRET || "change-this-valtrix-secret";
 
-const DATA_DIR = path.join(__dirname, "data");
+const dataDir = path.join(__dirname, "data");
+fs.mkdirSync(dataDir, { recursive: true });
 
-if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, {
-    recursive: true
-  });
-}
-
-const DATABASE_FILE = path.join(
-  DATA_DIR,
-  "valtrix.db"
-);
-
-console.log("Diretório do banco:", DATA_DIR);
-console.log("Banco:", DATABASE_FILE);
-
-const db = new Database(DATABASE_FILE);
-
+const db = new Database(path.join(dataDir, "valtrix.db"));
 db.pragma("journal_mode = WAL");
 
 db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT NOT NULL UNIQUE,
-    password_hash TEXT NOT NULL,
-    display_name TEXT NOT NULL,
-    created_at INTEGER NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS groups (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    owner_id INTEGER NOT NULL,
-    created_at INTEGER NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS group_members (
-    group_id INTEGER NOT NULL,
-    user_id INTEGER NOT NULL,
-    PRIMARY KEY (group_id, user_id)
-  );
-
-  CREATE TABLE IF NOT EXISTS messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    group_id INTEGER NOT NULL,
-    user_id INTEGER NOT NULL,
-    text TEXT NOT NULL,
-    created_at INTEGER NOT NULL
-  );
-`);
-
-console.log("Banco de dados inicializado.");
-
-// ======================================================
-// EXPRESS
-// ======================================================
-
-app.use(express.json());
-
-app.use(
-  express.static(
-    path.join(__dirname, "public")
-  )
+CREATE TABLE IF NOT EXISTS users (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  username TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  created_at INTEGER NOT NULL
 );
 
-// ======================================================
-// FUNÇÕES
-// ======================================================
+CREATE TABLE IF NOT EXISTS groups (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  owner_id INTEGER NOT NULL,
+  created_at INTEGER NOT NULL
+);
 
-function createToken(user) {
+CREATE TABLE IF NOT EXISTS group_members (
+  group_id INTEGER NOT NULL,
+  user_id INTEGER NOT NULL,
+  PRIMARY KEY (group_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id INTEGER NOT NULL,
+  user_id INTEGER NOT NULL,
+  text TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+`);
+
+app.use(express.json({ limit: "1mb" }));
+app.use(express.static(path.join(__dirname, "public")));
+
+function userById(id) {
+  return db.prepare(
+    "SELECT id, username, display_name FROM users WHERE id = ?"
+  ).get(id);
+}
+
+function makeToken(user) {
   return jwt.sign(
     {
       id: user.id,
@@ -114,1084 +72,426 @@ function createToken(user) {
       displayName: user.display_name
     },
     JWT_SECRET,
-    {
-      expiresIn: "30d"
-    }
+    { expiresIn: "30d" }
   );
 }
 
-function authenticate(req, res, next) {
+function auth(req, res, next) {
   try {
-    const authorization =
-      req.headers.authorization || "";
-
-    if (!authorization.startsWith("Bearer ")) {
-      return res.status(401).json({
-        error: "Não autenticado."
-      });
+    const header = req.headers.authorization || "";
+    if (!header.startsWith("Bearer ")) {
+      return res.status(401).json({ error: "Não autenticado" });
     }
 
-    const token =
-      authorization.substring(7);
-
-    req.user = jwt.verify(
-      token,
-      JWT_SECRET
-    );
-
+    req.user = jwt.verify(header.slice(7), JWT_SECRET);
     next();
-  } catch (error) {
-    return res.status(401).json({
-      error: "Token inválido ou expirado."
+  } catch {
+    res.status(401).json({ error: "Sessão inválida ou expirada" });
+  }
+}
+
+function isMember(groupId, userId) {
+  return !!db.prepare(
+    "SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?"
+  ).get(groupId, userId);
+}
+
+function getMembers(groupId) {
+  return db.prepare(`
+    SELECT u.id, u.username, u.display_name
+    FROM users u
+    JOIN group_members gm ON gm.user_id = u.id
+    WHERE gm.group_id = ?
+    ORDER BY u.display_name
+  `).all(groupId);
+}
+
+app.get("/api/health", (req, res) => {
+  res.json({ ok: true, app: "Valtrix", version: "4.0.0" });
+});
+
+app.get("/api/config", (req, res) => {
+  const iceServers = [
+    { urls: "stun:stun.l.google.com:19302" }
+  ];
+
+  if (process.env.TURN_URL) {
+    iceServers.push({
+      urls: process.env.TURN_URL,
+      username: process.env.TURN_USERNAME || "",
+      credential: process.env.TURN_CREDENTIAL || ""
     });
   }
-}
 
-function getUserById(id) {
-  return db
-    .prepare(`
-      SELECT
-        id,
-        username,
-        display_name
-      FROM users
-      WHERE id = ?
-    `)
-    .get(id);
-}
+  res.json({ iceServers });
+});
 
-function getGroupForUser(
-  groupId,
-  userId
-) {
-  return db
-    .prepare(`
-      SELECT
-        g.id,
-        g.name,
-        g.owner_id,
-        g.created_at
-      FROM groups g
-      INNER JOIN group_members gm
-        ON gm.group_id = g.id
-      WHERE
-        g.id = ?
-        AND gm.user_id = ?
-    `)
-    .get(
-      groupId,
-      userId
-    );
-}
+app.post("/api/register", (req, res) => {
+  try {
+    const username = String(req.body.username || "").trim().toLowerCase();
+    const displayName = String(
+      req.body.displayName || username
+    ).trim().slice(0, 40);
+    const password = String(req.body.password || "");
 
-function getGroupMembers(groupId) {
-  return db
-    .prepare(`
-      SELECT
-        u.id,
-        u.username,
-        u.display_name
-      FROM users u
-      INNER JOIN group_members gm
-        ON gm.user_id = u.id
-      WHERE gm.group_id = ?
-      ORDER BY u.display_name
-    `)
-    .all(groupId);
-}
-
-// ======================================================
-// CONFIGURAÇÃO WEBRTC
-// ======================================================
-
-app.get(
-  "/api/config",
-  (req, res) => {
-    const iceServers = [
-      {
-        urls:
-          "stun:stun.l.google.com:19302"
-      }
-    ];
-
-    if (process.env.TURN_URL) {
-      iceServers.push({
-        urls: process.env.TURN_URL,
-        username:
-          process.env.TURN_USERNAME || "",
-        credential:
-          process.env.TURN_CREDENTIAL || ""
+    if (!/^[a-z0-9_.-]{3,32}$/.test(username)) {
+      return res.status(400).json({
+        error: "Usuário inválido. Use 3-32 caracteres: letras, números, _, . ou -."
       });
     }
+
+    if (password.length < 6) {
+      return res.status(400).json({
+        error: "A senha precisa ter pelo menos 6 caracteres."
+      });
+    }
+
+    const hash = bcrypt.hashSync(password, 12);
+
+    const result = db.prepare(`
+      INSERT INTO users(username, password_hash, display_name, created_at)
+      VALUES (?, ?, ?, ?)
+    `).run(username, hash, displayName, Date.now());
+
+    const user = userById(result.lastInsertRowid);
 
     res.json({
-      iceServers
-    });
-  }
-);
-
-// ======================================================
-// HEALTH CHECK
-// ======================================================
-
-app.get(
-  "/api/health",
-  (req, res) => {
-    res.json({
-      status: "online",
-      app: "Valtrix Chat",
-      version: "3.0.0",
-      time: new Date().toISOString()
-    });
-  }
-);
-
-// ======================================================
-// REGISTRO
-// ======================================================
-
-app.post(
-  "/api/register",
-  (req, res) => {
-    try {
-      const username = String(
-        req.body.username || ""
-      )
-        .trim()
-        .toLowerCase();
-
-      const displayName = String(
-        req.body.displayName ||
-          username
-      )
-        .trim()
-        .slice(0, 40);
-
-      const password = String(
-        req.body.password || ""
-      );
-
-      if (
-        !/^[a-z0-9_.-]{3,32}$/.test(
-          username
-        )
-      ) {
-        return res.status(400).json({
-          error:
-            "Usuário inválido."
-        });
-      }
-
-      if (password.length < 6) {
-        return res.status(400).json({
-          error:
-            "A senha precisa ter pelo menos 6 caracteres."
-        });
-      }
-
-      if (!displayName) {
-        return res.status(400).json({
-          error:
-            "Digite um nome."
-        });
-      }
-
-      const passwordHash =
-        bcrypt.hashSync(
-          password,
-          12
-        );
-
-      const result =
-        db.prepare(`
-          INSERT INTO users (
-            username,
-            password_hash,
-            display_name,
-            created_at
-          )
-          VALUES (?, ?, ?, ?)
-        `).run(
-          username,
-          passwordHash,
-          displayName,
-          Date.now()
-        );
-
-      const user =
-        getUserById(
-          result.lastInsertRowid
-        );
-
-      const token =
-        createToken(user);
-
-      res.json({
-        token,
-        user
-      });
-    } catch (error) {
-      console.error(
-        "Erro no registro:",
-        error
-      );
-
-      if (
-        String(
-          error.message
-        ).includes(
-          "UNIQUE constraint failed"
-        )
-      ) {
-        return res.status(409).json({
-          error:
-            "Esse usuário já existe."
-        });
-      }
-
-      res.status(500).json({
-        error:
-          "Erro interno."
-      });
-    }
-  }
-);
-
-// ======================================================
-// LOGIN
-// ======================================================
-
-app.post(
-  "/api/login",
-  (req, res) => {
-    try {
-      const username = String(
-        req.body.username || ""
-      )
-        .trim()
-        .toLowerCase();
-
-      const password = String(
-        req.body.password || ""
-      );
-
-      const user =
-        db.prepare(`
-          SELECT *
-          FROM users
-          WHERE username = ?
-        `).get(username);
-
-      if (!user) {
-        return res.status(401).json({
-          error:
-            "Usuário ou senha incorretos."
-        });
-      }
-
-      const validPassword =
-        bcrypt.compareSync(
-          password,
-          user.password_hash
-        );
-
-      if (!validPassword) {
-        return res.status(401).json({
-          error:
-            "Usuário ou senha incorretos."
-        });
-      }
-
-      const token =
-        createToken(user);
-
-      res.json({
-        token,
-        user:
-          getUserById(user.id)
-      });
-    } catch (error) {
-      console.error(
-        "Erro no login:",
-        error
-      );
-
-      res.status(500).json({
-        error:
-          "Erro interno."
-      });
-    }
-  }
-);
-
-// ======================================================
-// USUÁRIO LOGADO
-// ======================================================
-
-app.get(
-  "/api/me",
-  authenticate,
-  (req, res) => {
-    const user =
-      getUserById(
-        req.user.id
-      );
-
-    if (!user) {
-      return res.status(404).json({
-        error:
-          "Usuário não encontrado."
-      });
-    }
-
-    res.json({
+      token: makeToken(user),
       user
     });
+  } catch (error) {
+    if (String(error.message).includes("UNIQUE")) {
+      return res.status(409).json({ error: "Esse usuário já existe." });
+    }
+
+    console.error(error);
+    res.status(500).json({ error: "Erro ao criar conta." });
   }
-);
+});
 
-// ======================================================
-// LISTAR GRUPOS
-// ======================================================
+app.post("/api/login", (req, res) => {
+  const username = String(req.body.username || "").trim().toLowerCase();
+  const password = String(req.body.password || "");
 
-app.get(
-  "/api/groups",
-  authenticate,
-  (req, res) => {
-    const groups =
-      db.prepare(`
-        SELECT
-          g.id,
-          g.name,
-          g.owner_id,
-          g.created_at
-        FROM groups g
-        INNER JOIN group_members gm
-          ON gm.group_id = g.id
-        WHERE gm.user_id = ?
-        ORDER BY g.id DESC
-      `).all(req.user.id);
+  const user = db.prepare(
+    "SELECT * FROM users WHERE username = ?"
+  ).get(username);
 
-    res.json({
-      groups
+  if (!user || !bcrypt.compareSync(password, user.password_hash)) {
+    return res.status(401).json({
+      error: "Usuário ou senha incorretos."
     });
   }
-);
 
-// ======================================================
-// CRIAR GRUPO
-// ======================================================
+  res.json({
+    token: makeToken(user),
+    user: userById(user.id)
+  });
+});
 
-app.post(
-  "/api/groups",
-  authenticate,
-  (req, res) => {
-    try {
-      const name = String(
-        req.body.name || ""
-      )
-        .trim()
-        .slice(0, 60);
+app.get("/api/me", auth, (req, res) => {
+  const user = userById(req.user.id);
 
-      if (!name) {
-        return res.status(400).json({
-          error:
-            "Nome do grupo obrigatório."
-        });
-      }
-
-      const result =
-        db.prepare(`
-          INSERT INTO groups (
-            name,
-            owner_id,
-            created_at
-          )
-          VALUES (?, ?, ?)
-        `).run(
-          name,
-          req.user.id,
-          Date.now()
-        );
-
-      const groupId =
-        result.lastInsertRowid;
-
-      db.prepare(`
-        INSERT INTO group_members (
-          group_id,
-          user_id
-        )
-        VALUES (?, ?)
-      `).run(
-        groupId,
-        req.user.id
-      );
-
-      const group =
-        db.prepare(`
-          SELECT
-            id,
-            name,
-            owner_id,
-            created_at
-          FROM groups
-          WHERE id = ?
-        `).get(groupId);
-
-      res.json({
-        group
-      });
-    } catch (error) {
-      console.error(
-        "Erro criando grupo:",
-        error
-      );
-
-      res.status(500).json({
-        error:
-          "Não foi possível criar o grupo."
-      });
-    }
+  if (!user) {
+    return res.status(404).json({ error: "Usuário não encontrado." });
   }
-);
 
-// ======================================================
-// ENTRAR NO GRUPO
-// ======================================================
+  res.json({ user });
+});
 
-app.post(
-  "/api/groups/:id/join",
-  authenticate,
-  (req, res) => {
-    const groupId =
-      Number(req.params.id);
+app.get("/api/users", auth, (req, res) => {
+  const q = String(req.query.q || "").trim().toLowerCase();
 
-    const group =
-      db.prepare(`
-        SELECT
-          id,
-          name,
-          owner_id,
-          created_at
-        FROM groups
-        WHERE id = ?
-      `).get(groupId);
+  const users = db.prepare(`
+    SELECT id, username, display_name
+    FROM users
+    WHERE id <> ?
+      AND (username LIKE ? OR display_name LIKE ?)
+    ORDER BY display_name
+    LIMIT 50
+  `).all(req.user.id, `%${q}%`, `%${q}%`);
 
-    if (!group) {
-      return res.status(404).json({
-        error:
-          "Grupo não encontrado."
-      });
-    }
+  res.json({ users });
+});
 
-    db.prepare(`
-      INSERT OR IGNORE INTO group_members (
-        group_id,
-        user_id
-      )
-      VALUES (?, ?)
-    `).run(
-      groupId,
-      req.user.id
-    );
+app.get("/api/groups", auth, (req, res) => {
+  const groups = db.prepare(`
+    SELECT g.id, g.name, g.owner_id, g.created_at
+    FROM groups g
+    JOIN group_members gm ON gm.group_id = g.id
+    WHERE gm.user_id = ?
+    ORDER BY g.id DESC
+  `).all(req.user.id);
 
-    res.json({
-      group
+  res.json({ groups });
+});
+
+app.post("/api/groups", auth, (req, res) => {
+  const name = String(req.body.name || "").trim().slice(0, 60);
+
+  if (!name) {
+    return res.status(400).json({ error: "Nome do grupo obrigatório." });
+  }
+
+  const result = db.prepare(`
+    INSERT INTO groups(name, owner_id, created_at)
+    VALUES (?, ?, ?)
+  `).run(name, req.user.id, Date.now());
+
+  db.prepare(`
+    INSERT INTO group_members(group_id, user_id)
+    VALUES (?, ?)
+  `).run(result.lastInsertRowid, req.user.id);
+
+  const group = db.prepare(
+    "SELECT id, name, owner_id, created_at FROM groups WHERE id = ?"
+  ).get(result.lastInsertRowid);
+
+  res.json({ group });
+});
+
+app.post("/api/groups/:id/join", auth, (req, res) => {
+  const groupId = Number(req.params.id);
+
+  const group = db.prepare(
+    "SELECT id, name, owner_id, created_at FROM groups WHERE id = ?"
+  ).get(groupId);
+
+  if (!group) {
+    return res.status(404).json({ error: "Grupo não encontrado." });
+  }
+
+  db.prepare(`
+    INSERT OR IGNORE INTO group_members(group_id, user_id)
+    VALUES (?, ?)
+  `).run(groupId, req.user.id);
+
+  res.json({ group });
+});
+
+app.get("/api/groups/:id/messages", auth, (req, res) => {
+  const groupId = Number(req.params.id);
+
+  if (!isMember(groupId, req.user.id)) {
+    return res.status(403).json({
+      error: "Você não pertence a este grupo."
     });
   }
-);
 
-// ======================================================
-// MENSAGENS
-// ======================================================
+  const messages = db.prepare(`
+    SELECT
+      m.id,
+      m.group_id,
+      m.text,
+      m.created_at,
+      u.id AS user_id,
+      u.username,
+      u.display_name
+    FROM messages m
+    JOIN users u ON u.id = m.user_id
+    WHERE m.group_id = ?
+    ORDER BY m.id DESC
+    LIMIT 100
+  `).all(groupId).reverse();
 
-app.get(
-  "/api/groups/:id/messages",
-  authenticate,
-  (req, res) => {
-    const groupId =
-      Number(req.params.id);
+  res.json({ messages });
+});
 
-    const group =
-      getGroupForUser(
-        groupId,
-        req.user.id
-      );
+app.get("/api/groups/:id/members", auth, (req, res) => {
+  const groupId = Number(req.params.id);
 
-    if (!group) {
-      return res.status(403).json({
-        error:
-          "Você não pertence ao grupo."
-      });
-    }
-
-    const messages =
-      db.prepare(`
-        SELECT
-          m.id,
-          m.group_id,
-          m.text,
-          m.created_at,
-          u.id AS user_id,
-          u.username,
-          u.display_name
-        FROM messages m
-        INNER JOIN users u
-          ON u.id = m.user_id
-        WHERE m.group_id = ?
-        ORDER BY m.id DESC
-        LIMIT 100
-      `).all(groupId);
-
-    messages.reverse();
-
-    res.json({
-      messages
+  if (!isMember(groupId, req.user.id)) {
+    return res.status(403).json({
+      error: "Você não pertence a este grupo."
     });
   }
-);
 
-// ======================================================
-// MEMBROS
-// ======================================================
+  res.json({ members: getMembers(groupId) });
+});
 
-app.get(
-  "/api/groups/:id/members",
-  authenticate,
-  (req, res) => {
-    const groupId =
-      Number(req.params.id);
+const socketsByUser = new Map();
 
-    const group =
-      getGroupForUser(
-        groupId,
-        req.user.id
-      );
+function sendPresence(groupId) {
+  const users = getMembers(groupId).map(user => ({
+    ...user,
+    online: (socketsByUser.get(user.id)?.size || 0) > 0
+  }));
 
-    if (!group) {
-      return res.status(403).json({
-        error:
-          "Você não pertence ao grupo."
-      });
-    }
-
-    res.json({
-      members:
-        getGroupMembers(
-          groupId
-        )
-    });
-  }
-);
-
-// ======================================================
-// USUÁRIOS CONECTADOS
-// ======================================================
-
-const connectedUsers =
-  new Map();
-
-// ======================================================
-// SOCKET AUTH
-// ======================================================
-
-io.use(
-  (socket, next) => {
-    try {
-      const token =
-        socket.handshake.auth?.token;
-
-      if (!token) {
-        return next(
-          new Error(
-            "Não autenticado"
-          )
-        );
-      }
-
-      socket.user =
-        jwt.verify(
-          token,
-          JWT_SECRET
-        );
-
-      next();
-    } catch (error) {
-      next(
-        new Error(
-          "Token inválido"
-        )
-      );
-    }
-  }
-);
-
-// ======================================================
-// SOCKET.IO
-// ======================================================
-
-io.on(
-  "connection",
-  socket => {
-    console.log(
-      "Usuário conectado:",
-      socket.user.username,
-      socket.id
-    );
-
-    connectedUsers.set(
-      socket.id,
-      socket.user
-    );
-
-    // ================================================
-    // ENTRAR NO GRUPO
-    // ================================================
-
-    socket.on(
-      "join-group",
-      data => {
-        const groupId =
-          Number(
-            data?.groupId
-          );
-
-        if (!groupId) {
-          return;
-        }
-
-        const group =
-          getGroupForUser(
-            groupId,
-            socket.user.id
-          );
-
-        if (!group) {
-          return;
-        }
-
-        socket.join(
-          `group:${groupId}`
-        );
-
-        socket.data.groupId =
-          groupId;
-
-        sendPresence(
-          groupId
-        );
-      }
-    );
-
-    // ================================================
-    // MENSAGEM
-    // ================================================
-
-    socket.on(
-      "message",
-      data => {
-        const groupId =
-          Number(
-            data?.groupId
-          );
-
-        const text =
-          String(
-            data?.text || ""
-          )
-            .trim()
-            .slice(0, 4000);
-
-        if (!groupId || !text) {
-          return;
-        }
-
-        const group =
-          getGroupForUser(
-            groupId,
-            socket.user.id
-          );
-
-        if (!group) {
-          return;
-        }
-
-        const result =
-          db.prepare(`
-            INSERT INTO messages (
-              group_id,
-              user_id,
-              text,
-              created_at
-            )
-            VALUES (?, ?, ?, ?)
-          `).run(
-            groupId,
-            socket.user.id,
-            text,
-            Date.now()
-          );
-
-        const message = {
-          id:
-            result.lastInsertRowid,
-
-          groupId,
-
-          userId:
-            socket.user.id,
-
-          username:
-            socket.user.username,
-
-          displayName:
-            socket.user.displayName,
-
-          text,
-
-          time:
-            Date.now()
-        };
-
-        io.to(
-          `group:${groupId}`
-        ).emit(
-          "message",
-          message
-        );
-      }
-    );
-
-    // ================================================
-    // WEBRTC OFFER
-    // ================================================
-
-    socket.on(
-      "webrtc-offer",
-      data => {
-        if (
-          !data?.to ||
-          !data?.offer
-        ) {
-          return;
-        }
-
-        io.to(
-          data.to
-        ).emit(
-          "webrtc-offer",
-          {
-            from:
-              socket.id,
-            offer:
-              data.offer
-          }
-        );
-      }
-    );
-
-    // ================================================
-    // WEBRTC ANSWER
-    // ================================================
-
-    socket.on(
-      "webrtc-answer",
-      data => {
-        if (
-          !data?.to ||
-          !data?.answer
-        ) {
-          return;
-        }
-
-        io.to(
-          data.to
-        ).emit(
-          "webrtc-answer",
-          {
-            from:
-              socket.id,
-            answer:
-              data.answer
-          }
-        );
-      }
-    );
-
-    // ================================================
-    // WEBRTC ICE
-    // ================================================
-
-    socket.on(
-      "webrtc-ice",
-      data => {
-        if (
-          !data?.to ||
-          !data?.candidate
-        ) {
-          return;
-        }
-
-        io.to(
-          data.to
-        ).emit(
-          "webrtc-ice",
-          {
-            from:
-              socket.id,
-            candidate:
-              data.candidate
-          }
-        );
-      }
-    );
-
-    // ================================================
-    // ESTADO DA CHAMADA
-    // ================================================
-
-    socket.on(
-      "call-state",
-      data => {
-        const groupId =
-          Number(
-            data?.groupId
-          );
-
-        if (!groupId) {
-          return;
-        }
-
-        const group =
-          getGroupForUser(
-            groupId,
-            socket.user.id
-          );
-
-        if (!group) {
-          return;
-        }
-
-        socket
-          .to(
-            `group:${groupId}`
-          )
-          .emit(
-            "call-state",
-            {
-              id:
-                socket.id,
-
-              username:
-                socket.user.displayName,
-
-              type:
-                data.type,
-
-              active:
-                data.active
-            }
-          );
-      }
-    );
-
-    // ================================================
-    // DESCONECTAR
-    // ================================================
-
-    socket.on(
-      "disconnect",
-      () => {
-        console.log(
-          "Usuário desconectado:",
-          socket.user.username
-        );
-
-        const groupId =
-          socket.data.groupId;
-
-        connectedUsers.delete(
-          socket.id
-        );
-
-        if (groupId) {
-          sendPresence(
-            groupId
-          );
-        }
-      }
-    );
-  }
-);
-
-// ======================================================
-// PRESENÇA
-// ======================================================
-
-function sendPresence(
-  groupId
-) {
-  const members =
-    getGroupMembers(
-      groupId
-    );
-
-  const onlineMembers =
-    members.map(
-      member => ({
-        ...member,
-
-        online:
-          [
-            ...connectedUsers.values()
-          ].some(
-            user =>
-              user.id ===
-              member.id
-          )
-      })
-    );
-
-  io.to(
-    `group:${groupId}`
-  ).emit(
-    "presence",
-    onlineMembers
-  );
+  io.to(`group:${groupId}`).emit("presence", users);
 }
 
-// ======================================================
-// FRONTEND
-// ======================================================
-//
-// IMPORTANTE:
-// Não usamos app.get("*"), pois versões
-// novas do Express/router podem gerar:
-// "Missing parameter name at index 1: *"
-//
-// ======================================================
+io.use((socket, next) => {
+  try {
+    const token = socket.handshake.auth?.token;
 
-app.use(
-  (req, res, next) => {
-    if (
-      req.path.startsWith(
-        "/api/"
-      )
-    ) {
-      return next();
+    if (!token) {
+      return next(new Error("AUTH_REQUIRED"));
     }
 
-    if (
-      req.method !== "GET"
-    ) {
-      return next();
-    }
-
-    const indexFile =
-      path.join(
-        __dirname,
-        "public",
-        "index.html"
-      );
-
-    if (
-      fs.existsSync(indexFile)
-    ) {
-      return res.sendFile(
-        indexFile
-      );
-    }
-
-    res.status(404).send(
-      "Valtrix Chat: frontend não encontrado."
-    );
+    socket.user = jwt.verify(token, JWT_SECRET);
+    next();
+  } catch {
+    next(new Error("AUTH_INVALID"));
   }
-);
+});
 
-// ======================================================
-// ERRO 404 API
-// ======================================================
+io.on("connection", socket => {
+  const userId = socket.user.id;
 
-app.use(
-  (req, res) => {
-    if (
-      req.path.startsWith(
-        "/api/"
-      )
-    ) {
-      return res.status(404).json({
-        error:
-          "Endpoint não encontrado."
+  if (!socketsByUser.has(userId)) {
+    socketsByUser.set(userId, new Set());
+  }
+
+  socketsByUser.get(userId).add(socket.id);
+  socket.join(`user:${userId}`);
+  socket.data.groups = new Set();
+
+  socket.on("join-group", data => {
+    const groupId = Number(data?.groupId);
+
+    if (!isMember(groupId, userId)) return;
+
+    socket.join(`group:${groupId}`);
+    socket.data.groups.add(groupId);
+
+    sendPresence(groupId);
+  });
+
+  socket.on("message", data => {
+    const groupId = Number(data?.groupId);
+    const text = String(data?.text || "").trim().slice(0, 4000);
+
+    if (!text || !isMember(groupId, userId)) return;
+
+    const result = db.prepare(`
+      INSERT INTO messages(group_id, user_id, text, created_at)
+      VALUES (?, ?, ?, ?)
+    `).run(groupId, userId, text, Date.now());
+
+    const user = userById(userId);
+
+    io.to(`group:${groupId}`).emit("message", {
+      id: result.lastInsertRowid,
+      groupId,
+      userId,
+      username: user.username,
+      displayName: user.display_name,
+      text,
+      time: Date.now()
+    });
+  });
+
+  // WebRTC signaling: oferta
+  socket.on("rtc:offer", data => {
+    if (data?.to && data.offer) {
+      io.to(data.to).emit("rtc:offer", {
+        from: socket.id,
+        offer: data.offer,
+        callId: data.callId,
+        user: socket.user
       });
     }
+  });
 
-    res.status(404).send(
-      "Página não encontrada."
-    );
+  // WebRTC signaling: resposta
+  socket.on("rtc:answer", data => {
+    if (data?.to && data.answer) {
+      io.to(data.to).emit("rtc:answer", {
+        from: socket.id,
+        answer: data.answer,
+        callId: data.callId
+      });
+    }
+  });
+
+  // WebRTC signaling: ICE
+  socket.on("rtc:ice", data => {
+    if (data?.to && data.candidate) {
+      io.to(data.to).emit("rtc:ice", {
+        from: socket.id,
+        candidate: data.candidate,
+        callId: data.callId
+      });
+    }
+  });
+
+  socket.on("rtc:hangup", data => {
+    if (data?.to) {
+      io.to(data.to).emit("rtc:hangup", {
+        from: socket.id,
+        callId: data.callId
+      });
+    }
+  });
+
+  // Controle da sala de chamada
+  socket.on("call:join", data => {
+    const groupId = Number(data?.groupId);
+
+    if (!isMember(groupId, userId)) return;
+
+    socket.to(`group:${groupId}`).emit("call:join", {
+      peerId: socket.id,
+      user: socket.user,
+      kind: data.kind
+    });
+  });
+
+  socket.on("call:leave", data => {
+    const groupId = Number(data?.groupId);
+
+    if (!isMember(groupId, userId)) return;
+
+    socket.to(`group:${groupId}`).emit("call:leave", {
+      peerId: socket.id
+    });
+  });
+
+  socket.on("disconnect", () => {
+    const set = socketsByUser.get(userId);
+
+    if (set) {
+      set.delete(socket.id);
+
+      if (!set.size) {
+        socketsByUser.delete(userId);
+      }
+    }
+
+    for (const groupId of socket.data.groups) {
+      sendPresence(groupId);
+    }
+  });
+});
+
+// IMPORTANTE:
+// Express 5 não aceita app.get("*") do mesmo modo que versões antigas.
+// Por isso usamos middleware simples para entregar index.html.
+app.use((req, res, next) => {
+  if (
+    req.path.startsWith("/api/") ||
+    req.path.startsWith("/socket.io/")
+  ) {
+    return next();
   }
-);
 
-// ======================================================
-// ERROS DO NODE
-// ======================================================
-
-process.on(
-  "uncaughtException",
-  error => {
-    console.error(
-      "ERRO NÃO TRATADO:",
-      error
-    );
+  if (req.method !== "GET") {
+    return next();
   }
-);
 
-process.on(
-  "unhandledRejection",
-  error => {
-    console.error(
-      "PROMISE NÃO TRATADA:",
-      error
-    );
+  const indexFile = path.join(__dirname, "public", "index.html");
+
+  if (fs.existsSync(indexFile)) {
+    return res.sendFile(indexFile);
   }
-);
 
-// ======================================================
-// INICIAR SERVIDOR
-// ======================================================
+  res.status(404).send("Valtrix");
+});
 
-server.listen(
-  PORT,
-  "0.0.0.0",
-  () => {
-    console.log("");
-    console.log(
-      "======================================"
-    );
-    console.log(
-      "       VALTRIX CHAT V3 ONLINE"
-    );
-    console.log(
-      "======================================"
-    );
-    console.log(
-      `Porta: ${PORT}`
-    );
-    console.log(
-      `Banco: ${DATABASE_FILE}`
-    );
-    console.log(
-      "Socket.IO: ativo"
-    );
-    console.log(
-      "WebRTC signaling: ativo"
-    );
-    console.log(
-      "Servidor pronto."
-    );
-    console.log(
-      "======================================"
-    );
-    console.log("");
-  }
-);
+app.use((req, res) => {
+  res.status(404).json({ error: "Não encontrado" });
+});
+
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`Valtrix V4 online na porta ${PORT}`);
+});
